@@ -76,6 +76,9 @@ is_enabled(Component) ->
 %%   for now and assume an upstream process is dealing with it.  This
 %%   timeout value should be revisited in the future and see if it
 %%   can't be removed from the API completely.
+
+%% TODO: could we use chunked response + all results at once to feed
+%% into pipe?
 -spec mapred_search(pipe(), [term()], pos_integer()) -> ok.
 mapred_search(Pipe, [Index, Query], _Timeout) ->
     mapred_search(Pipe, [Index, Query, <<"">>], _Timeout);
@@ -86,8 +89,10 @@ mapred_search(Pipe, [Index, Query, Filter], _Timeout) ->
              end,
     %% Function to convert `search_fold' results into pipe format.
     Q = fun({Bucket,Key,Props}) ->
+                %% TODO: fail job if queue_work doesn't return 'ok'
                 riak_pipe:queue_work(Pipe, {{Bucket, Key}, {struct, Props}})
         end,
+    %% TODO: Spawn worker for each chunk of results
     F = fun(Results, Acc) ->
                 %% TODO: is there a way to send a batch of results?
                 %% Avoiding the `foreach` would be nice.

@@ -311,6 +311,7 @@ reload_hashtrees(true, Ring, S=#state{mode=Mode, trees=Trees}) ->
 
     S2 = S#state{trees=Trees3},
     S3 = lists:foldl(fun({Idx,Pid}, SAcc) ->
+                             %% TODO: are we growing unlimited monitors here?
                              monitor(process, Pid),
                              case Mode of
                                  manual -> SAcc;
@@ -419,6 +420,7 @@ tick(S) ->
     S2 = reload_hashtrees(Ring, S),
     S3 = lists:foldl(fun(_,SAcc) ->
                              maybe_poke_tree(SAcc)
+                             %% TODO: why the shit is this 10?
                      end, S2, lists:seq(1,10)),
     maybe_exchange(Ring, S3).
 
@@ -470,6 +472,9 @@ start_exchange(Index, Preflist, Ring, S) ->
             %%
             %% TODO: hashtree_pid can return {error, wrong_node}
             %%       during ownership transfer, handle that case
+
+            %% TODO: this process might die, do we care if this causes
+            %% throw and thus entropy mgr to die?
             {ok, KVTree} = riak_kv_vnode:hashtree_pid(Index),
             case yz_exchange_fsm:start(Index, Preflist, YZTree,
                                        KVTree, self()) of

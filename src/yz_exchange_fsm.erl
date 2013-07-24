@@ -141,6 +141,8 @@ update_trees({tree_built, _, _}, S) ->
     case Built of
         2 ->
             lager:debug("Moving to key exchange"),
+            %% TODO: you will be fucked if another msg comes in, don't
+            %% trust 0 timeout, send msg to self, EOM
             {next_state, key_exchange, S, 0};
         _ ->
             {next_state, update_trees, S#state{built=Built}}
