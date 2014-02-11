@@ -30,8 +30,8 @@
 %%     <age>29</age>
 %%   </person>
 %%
-%%   [{<<"person_name">>, <<"Ryan">>},
-%%    {<<"person_age">>, <<"29">>}]
+%%   [{<<"person.name">>, <<"Ryan">>},
+%%    {<<"person.age">>, <<"29">>}]
 %%
 %% Options:
 %%
@@ -41,10 +41,12 @@
 -compile(export_all).
 -include("yokozuna.hrl").
 -define(DEFAULT_FIELD_SEPARATOR, <<".">>).
+-define(DEFAULT_NS_SEPARATOR, <<"@">>).
 -record(state, {
           name_stack = [],
           fields = [],
-          field_separator = ?DEFAULT_FIELD_SEPARATOR
+          field_separator = ?DEFAULT_FIELD_SEPARATOR,
+          ns_separator = ?DEFAULT_NS_SEPARATOR
          }).
 
 extract(Value) ->
@@ -53,7 +55,8 @@ extract(Value) ->
 -spec extract(binary(), proplist()) -> fields() | {error, any()}.
 extract(Value, Opts) ->
     Sep = proplists:get_value(field_separator, Opts, ?DEFAULT_FIELD_SEPARATOR),
-    extract_fields(Value, #state{field_separator=Sep}).
+    NSSep = proplists:get_value(ns_separator, Opts, ?DEFAULT_NS_SEPARATOR),
+    extract_fields(Value, #state{field_separator=Sep, ns_separator=NSSep}).
 
 extract_fields(Data, State) ->
     Options = [{event_fun, fun sax_cb/3}, {event_state, State}],
@@ -64,10 +67,26 @@ extract_fields(Data, State) ->
             parsing_error(Loc, Reason)
     end.
 
+sax_cb({startPrefixMapping, _Prefix, _Uri}=P, _, S) ->
+    io:format("~p~n", [P]),
+    S;
+
+sax_cb({endPrefixMapping, _Prefix}=P, _, S) ->
+    io:format("~p~n", [P]),
+    S;
+
 %% @private
-sax_cb({startElement, _Uri, Name, _QualName, Attrs}, _Location, S) ->
-    NewNameStack = [Name | S#state.name_stack],
+sax_cb({startElement, NS, Name, {_NS, _Name}, Attrs}, _Location, S) ->
     Separator = S#state.field_separator,
+    _NSSeparator = S#state.ns_separator,
+    Name2 = case NS of
+                [] ->
+                    Name;
+                _ ->
+                    <<"{",(unicode:characters_to_binary(NS))/binary,"}",(unicode:characters_to_binary(Name))/binary>>
+            end,
+    io:format("startElement ~p ~p ~p ~p~n", [NS, Name, {_NS, _Name}, Attrs]),
+    NewNameStack = [Name2 | S#state.name_stack],
     AttrFields = case Attrs of
                      [] ->
                          [];
@@ -80,10 +99,12 @@ sax_cb({startElement, _Uri, Name, _QualName, Attrs}, _Location, S) ->
 
 %% End of an element, collapse it into the previous item on the stack...
 sax_cb({endElement, _Uri, _Name, _QualName}, _Location, S) ->
+    io:format("endElement ~p ~p ~p~n", [_Uri, _Name, _QualName]),
     S#state{name_stack=tl(S#state.name_stack)};
 
 %% Got a value, set it to the value of the topmost element in the stack...
 sax_cb({characters, Value}, _Location, S) ->
+    io:format("characters ~p~n", [Value]),
     Name = make_name(S#state.field_separator, S#state.name_stack),
     Field = {Name, unicode:characters_to_binary(Value)},
     S#state{fields = [Field|S#state.fields]};
@@ -101,6 +122,7 @@ make_attr_fields(BaseName, [{_Uri, _Prefix, AttrName, Value}|Attrs], Fields) ->
     make_attr_fields(BaseName, Attrs, [Field | Fields]).
 
 make_name(Seperator, Stack) ->
+    io:format("make_name ~p ~p~n", [Seperator, Stack]),
     make_name(Seperator, Stack, <<>>).
 
 %% Make a name from a stack of visted tags (innermost tag at head of list)
@@ -108,7 +130,12 @@ make_name(Seperator, Stack) ->
 make_name(Seperator, [Inner,Outter|Rest], Name) ->
     OutterB = unicode:characters_to_binary(Outter),
     InnerB = unicode:characters_to_binary(Inner),
-    Name2 = concat(OutterB, Seperator, InnerB, Name),
+    Name2 = case Name of
+                <<>> ->
+                    <<OutterB/binary,Seperator/binary,InnerB/binary,Name/binary>>;
+                _ ->
+                    <<OutterB/binary,Seperator/binary,InnerB/binary,Seperator/binary,Name/binary>>
+            end,
     make_name(Seperator, Rest, Name2);
 make_name(Seperator, [Outter], Name) ->
     OutterB = unicode:characters_to_binary(Outter),
@@ -123,9 +150,3 @@ parsing_error({_, _, Line}, Reason) ->
     Msg = io_lib:format("failure parsing XML at line ~w with reason \"~s\"",
                         [Line, Reason]),
     {error, Msg}.
-
--spec concat(binary(), binary(), binary(), binary()) -> binary().
-concat(Outter, Sep, Inner, <<>>) ->
-    <<Outter/binary,Sep/binary,Inner/binary>>;
-concat(Outter, Sep, Inner, Current) ->
-    <<Outter/binary,Sep/binary,Inner/binary,Sep/binary,Current/binary>>.
