@@ -24,7 +24,7 @@ import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.index.AtomicReader;
 import org.apache.lucene.index.DocsEnum;
-import org.apache.lucene.index.Terms;
+// import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.search.DocIdSetIterator;
 
@@ -83,14 +83,15 @@ public class EntropyData
             final SolrIndexSearcher searcher = req.getSearcher();
             final AtomicReader rdr = searcher.getAtomicReader();
             BytesRef tmp = null;
-            final Terms terms = rdr.terms(ENTROPY_DATA_FIELD);
+            final SortedDocValues sdv = rdr.getSortedDocValues(ENTROPY_DATA_FIELD);
+            // final Terms terms = rdr.terms(ENTROPY_DATA_FIELD);
 
-            if (terms == null) {
+            if (sdv == null) {
                 rsp.add("more", false);
                 return;
             }
 
-            final TermsEnum te = terms.iterator(null);
+            final TermsEnum te = sdv.termsEnum();
 
             if (isContinue(cont)) {
                 if (log.isDebugEnabled()) {

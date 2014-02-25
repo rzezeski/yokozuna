@@ -321,7 +321,7 @@
 -define(YZ_ED_FIELD, '_yz_ed').
 -define(YZ_ED_FIELD_S, "_yz_ed").
 -define(YZ_ED_FIELD_XML, ?YZ_FIELD_XML(?YZ_ED_FIELD_S)).
--define(YZ_ED_FIELD_XPATH, "/schema/fields/field[@name=\"_yz_ed\" and @type=\"_yz_str\" and @indexed=\"true\"]").
+-define(YZ_ED_FIELD_XPATH, "/schema/fields/field[@name=\"_yz_ed\" and @type=\"_yz_str\" and @indexed=\"false\" and @stored=\"false\" and @docValues=\"true\"]").
 
 %% First Partition Number
 -define(YZ_FPN_FIELD, '_yz_fpn').
