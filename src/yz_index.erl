@@ -19,8 +19,40 @@
 %% -------------------------------------------------------------------
 
 -module(yz_index).
+-behavior(gen_server).
 -include("yokozuna.hrl").
 -compile(export_all).
+-export([code_change/3,
+         handle_call/3,
+         handle_cast/2,
+         handle_info/2,
+         init/1,
+         terminate/2]).
+
+-record(create_req,
+        {
+          %% The caller to which a reply should be made.
+          from :: term(),
+
+          %% Reference do distinguish delayed replies from previous
+          %% failed request.
+          reference :: reference(),
+
+          %% List of nodes for which a reply is outstanding.
+          outstanding_nodes :: [nodes()],
+
+          %% List of replies received.
+          replies :: [{node(), Reply::term()}]
+        }).
+-type create_req() :: #create_req{}.
+
+-record(state,
+        {
+          %% Dictionary of outstanding create requests keyed by name
+          %% and reference.
+          outstanding_create_requests :: dict(index_name(), creat_req())
+        }).
+-type state() :: #state{}.
 
 -record(index_info,
         {
@@ -142,66 +174,50 @@ get_index_info(Name) ->
 get_n_val(IndexInfo) ->
     IndexInfo#index_info.n_val.
 
-%% @doc Create the index `Name' locally.  Make best attempt to create
-%%      the index, log if a failure occurs.  Always return `ok'.
+%% @priavte
 %%
-%% NOTE: This should typically be called by a the ring handler in
-%%       `yz_event'.  The `create/1' API should be used to create a
-%%       cluster-wide index.
--spec local_create(index_name()) -> ok.
-local_create(Name) ->
+%% @doc Create the Solr Core locally.
+-spec create_solr_core(index_name(), schema_name(), raw_schema()) ->
+                              ok | {error, Reason::term()}.
+create_solr_core(Name, RawSchema) ->
     IndexDir = index_dir(Name),
     ConfDir = filename:join([IndexDir, "conf"]),
     ConfFiles = filelib:wildcard(filename:join([?YZ_PRIV, "conf", "*"])),
     DataDir = filename:join([IndexDir, "data"]),
-    SchemaName = schema_name(get_index_info(Name)),
-    case yz_schema:get(SchemaName) of
-        {ok, RawSchema} ->
-            SchemaFile = filename:join([ConfDir, yz_schema:filename(SchemaName)]),
-            LocalSchemaFile = filename:join([".", yz_schema:filename(SchemaName)]),
+    SchemaPath = filename:join([ConfDir, "schema.xml"]),
 
-            yz_misc:make_dirs([ConfDir, DataDir]),
-            yz_misc:copy_files(ConfFiles, ConfDir, update),
+    ok = yz_misc:make_dirs([ConfDir, DataDir]),
+    ok = yz_misc:copy_files(ConfFiles, ConfDir, update),
 
-            %% Delete `core.properties' file or CREATE may complain
-            %% about the core already existing. This can happen when
-            %% the core is initially created with a bad schema. Solr
-            %% gets in a state where CREATE thinks the core already
-            %% exists but RELOAD says no core exists.
-            PropsFile = filename:join([IndexDir, "core.properties"]),
-            file:delete(PropsFile),
+    %% Delete `core.properties' file or CREATE may complain
+    %% about the core already existing. This can happen when
+    %% the core is initially created with a bad schema. Solr
+    %% gets in a state where CREATE thinks the core already
+    %% exists but RELOAD says no core exists.
+    PropsFile = filename:join([IndexDir, "core.properties"]),
+    _ = file:delete(PropsFile),
 
-            ok = file:write_file(SchemaFile, RawSchema),
+    ok = file:write_file(SchemaPath, RawSchema),
 
-            CoreProps = [
-                         {name, Name},
-                         {index_dir, IndexDir},
-                         {cfg_file, ?YZ_CORE_CFG_FILE},
-                         {schema_file, LocalSchemaFile}
-                        ],
-            case yz_solr:core(create, CoreProps) of
-                {ok, _, _} ->
-                    lager:info("Created index ~s with schema ~s",
-                               [Name, SchemaName]),
-                    ok;
-                {error, Err} ->
-                    lager:error("Couldn't create index ~s: ~p", [Name, Err])
-            end,
-            ok;
-        {error, Reason} ->
-            lager:error("Couldn't create index ~s: ~p", [Name, Reason]),
-            ok
+    CoreProps = [
+                 {name, Name},
+                 {index_dir, IndexDir},
+                 {cfg_file, ?YZ_CORE_CFG_FILE},
+                ],
+
+    case yz_solr:core(create, CoreProps) of
+        {ok, _, _} -> ok;
+        {error, Err} = Error -> Error
     end.
 
-%% @doc Remove the index `Name' locally.
--spec local_remove(index_name()) -> ok.
-local_remove(Name) ->
+%% @doc Delete the solr core locally.
+-spec delete_solr_core(index_name()) -> ok | {error, Reason::term()}.
+delete_solr_core(Name) ->
     CoreProps = [
                     {core, Name},
                     {delete_instance, "true"}
                 ],
-    {ok, _, _} = yz_solr:core(remove, CoreProps),
-    ok.
+    yz_solr:core(remove, CoreProps).
 
 %% @doc Reload the `Index' cluster-wide. By default this will also
 %% pull the latest version of the schema associated with the
@@ -251,6 +267,238 @@ remove_non_owned_data(Index, Ring) ->
 -spec schema_name(index_info()) -> schema_name().
 schema_name(Info) ->
     Info#index_info.schema_name.
+
+-type create_req_opt() :: {n_val, n()} |
+                          {schema, schema_name()}.
+
+-type create_req_opts() :: [create_req_opt()].
+
+-type create_req_return() :: ok | {error, Reason::term()}.
+
+-spec create_request(index_name(), create_req_opts()) -> create_req_return().
+create_request(Name, Options) when is_binary(Name) ->
+    case validate_options(Options) of
+        ok ->
+            case are_all_nodes_up() of
+                true ->
+                    case not is_mixed_cluster() of
+                        true ->
+                            Ring = yz_misc:get_ring(transformed),
+                            send_create_request_to_claimant(Ring, Name, Options);
+                        false ->
+                            {error, mixed_cluster}
+                    end;
+                false ->
+                    {error, not_all_nodes_up}
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+-spec send_create_request_to_claimant(ring(), index_name(), create_req_opts()) ->
+                                             ok | {error, Reason::term()}.
+send_create_request_to_claimant(Ring, Name, Options) ->
+    Claimant = get_claimant(Ring),
+    gen_server:call({yz_index, Claimant}, {create_request, Name, Options}, infinity).
+
+%% @private
+%%
+%% @doc Extract the `Claimant' from the `Ring'.
+-spec get_claimant(ring()) -> Claimant::node().
+get_claimant(Ring) ->
+    riak_core_ring:claimant(Ring).
+
+%% @private
+%%
+%% @doc Check if the given `Node' is the claimant according to `Ring'.
+-spec is_claimant(ring(), node()) -> boolean().
+is_claimant(Ring, Node) ->
+    Node == get_claimant(Ring).
+
+%% @private
+-spec are_all_nodes_up() -> boolean().
+are_all_nodes_up() ->
+    [] == riak_core_apl:offline_owners(?YZ_SVC_NAME).
+
+%% @private
+%%
+%% TODO: implement
+is_mixed_cluster() ->
+    false.
+
+%% @private
+%%
+%% @doc Validate the create request options.
+-spec validate_options(create_req_opts()) -> ok | {error, Reason::term()}.
+validate_options([]) ->
+    ok;
+validate_options([Opt|Rest]) ->
+    case validate_option(Opt) of
+        ok -> validate_options(Rest);
+        {error, _} = Error -> Error
+    end.
+
+%% @private
+%%
+%% @doc Validate individual request options.
+-spec validate_options(create_req_opt()) -> ok | {error, Reason::term()}.
+validate_option({n_val, NVal}=Opt) ->
+    case is_integer(NVal) andalso NVal > 0 of
+        true ->
+            ok;
+        false ->
+            {error, {bad_opt, Opt}}
+    end;
+validate_option({schema, SchemaName}=Opt) ->
+    case is_binary(SchemaName) andalso yz_schema:exists(SchemaName) of
+        true ->
+            ok;
+        false ->
+            {error, {bad_opt, Opt}}
+    end;
+validate_option(Unknown) ->
+    {error, {unknown_opt, Unknown}}.
+
+
+%% @private
+%% send_create_request_to_claimant(
+
+%%%===================================================================
+%%% Server Callbacks
+%%%===================================================================
+
+init([]) ->
+    {ok, #state{}}.
+
+handle_cast({create_core, From, Ref, Name, RawSchema}, State) ->
+    case create_solr_core(Name,  RawSchema) of
+        ok ->
+            _ = gen_server:cast(From, {create_success, self(), Ref, Name}),
+            {noreply, State};
+        {error, _} = Error ->
+            _ = gen_server:cast(From, {create_failure, self(), Ref, Name}),
+            {noreply, State}
+    end;
+
+handle_cast({create_success, Node, Ref, Name}, State) ->
+    OutstandingReqs = State#state.outstanding_create_requests,
+    case dict:find(Name, OutstandingReqs) of
+        {ok, #create_req{} = CR}
+handle_cast(Msg, State) ->
+    lager:warning("Unknown message ~p", [Msg]),
+    {noreply, State}.
+
+handle_call({create_request, Name, Options}, From, State) ->
+    lager:debug("Received create request for ~s with options ~p", [Name, Options]),
+    OutstandingReqs = State#state.outstanding_create_requests,
+    case does_req_already_exist(Name, OutstandingReqs) of
+        true ->
+            Reply = {error, in_progress},
+            {reply, Reply, State};
+        false ->
+            SchemaName = proplsits:get_value(schema, Options, ?YZ_DEFAULT_SCHEMA_NAME),
+            {ok, RawSchema} = yz_schema:get(SchemaName),
+            case test_index(RawSchema) of
+                ok ->
+                    Reference = make_reference(),
+                    Nodes = get_yokozuna_nodes(),
+                    CreateReq = #create_req{from=From,
+                                            ref=Reference,
+                                            outstanding_nodes=Nodes,
+                                            replies=[]},
+                    CoreReq = {create_core, self(), Name, RawSchema},
+                    OutstandingReqs2 = dict:store(Name, CoreReq, OutstandingReqs),
+                    State2 = State#state{outstanding_create_requests=OutstandingReqs2},
+                    _ = gen_server:abcast(Nodes, ?MODULE, Req),
+                    _ = erlang:send_after(60 * 1000, self(), {create_timeout, Name, Reference}),
+                    {noreply, State2};
+                {error, _} = Error ->
+                    {reply, Error, State}
+            end,
+    end;
+
+handle_call(Msg, _From, State) ->
+    lager:warning("Unknown message ~p", [Msg]),
+    {noreply, State}.
+
+handle_info({create_timeout, Name, Reference}, State) ->
+    OutstandingReqs = State#state.outstanding_create_requests,
+    case dict:find(Name, OutstandingReqs) of
+        {ok, #create_req{} = CR} ->
+            case Reference == CR#create_req.reference of
+                true ->
+                    %% Create request timed out before all nodes replied.
+                    OutstandingReqs2 = dict:erase(Name, OutstandingReqs),
+                    From = CR#create_req.from,
+                    OutstandingNodes = CR#create_req.outstanding_nodes,
+                    gen_server:reply(From, {error, {timeout, OutstandingNodes}}),
+                    State2 = State#state{outstanding_create_requests=OutstandingReqs2},
+                    {noreply, State2};
+                false ->
+                    %% Timeout for create request which completed
+                    {noreply, State}
+            end;
+        error ->
+            %% Timeout for create request which completed
+            {noreply, State}
+    end.
+
+%% @private
+%%
+%% NOTE: One day Yokozuna may have it's own ring and only run on
+%% subset of nodes.
+get_yokozuna_nodes() ->
+    Ring = yz_misc:get_ring(transformed),
+    riak_core_ring:all_owners(Ring).
+
+%% @private
+does_req_already_exist(Name, OutstandingReqs) ->
+    dict:is_key(Name, OutstandingReqs).
+
+%% @private
+-spec test_index(index_name(), raw_schema()) -> ok | {error, Reason::term()}.
+test_index(Name, RawSchema) ->
+    TestIndexName = test_index_name(Name),
+    case create_solr_core(TestIndexName, RawSchema) of
+        ok ->
+            case core_healthcheck(TestIndexName) of
+                ok ->
+                    case delete_solr_core(TestIndexName) of
+                        ok ->
+                            ok;
+                        {error, Reason} ->
+                            %% Failed to cleanup test index but index
+                            %% was created successfully so return ok
+                            lager:warning("Failure to delete test index ~s with reason ~p",
+                                          [TestIndexName, Reason]),
+                            ok
+                    end;
+                {error, _} = Error ->
+                    Error
+            end;
+        {error, _} Error ->
+            Error
+    end.
+
+%% @private
+-spec core_healthcheck(index_name()) -> ok | {error, Reason::term()}.
+core_healthcheck(Name) ->
+    case yz_solr:core(status, [{wt,json}, {core,Name}]) of
+        {ok, _, Body} ->
+            case kvc:path([<<"initFailures">>], mochijson2:decode(Body)) of
+                {struct, []} ->
+                    ok;
+                {struct, [{Name, InitFailure}]} ->
+                    {error, {init_failure, InitFailure}}
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+%% @private
+-spec test_index_name(index_name()) -> index_name().
+test_index_name(Name) ->
+    <<"_test_",Name/binary>>.
 
 %%%===================================================================
 %%% Private

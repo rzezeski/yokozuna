@@ -27,6 +27,9 @@
 %%% API
 %%%===================================================================
 
+create_index(Name, Options) when is_binary(Name) ->
+    yz_index:create_request(Name, Options).
+
 %% @doc Disable the given `Component'.  The main reason for disabling
 %%      a component is to help in diagnosing issues in a live,
 %%      production environment.  E.g. the `search' component may be
