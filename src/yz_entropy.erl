@@ -29,7 +29,8 @@
 
 %% @doc Iterate all the entropy data in `Index' calling `Fun' for
 %%      every 100 entries.
--spec iterate_entropy_data(index_name(), list(), function()) -> ok.
+-spec iterate_entropy_data(index_name(), list(), function()) ->
+                                  ok | {error, term()}.
 iterate_entropy_data(Index, Filter, Fun) ->
     case yz_solr:ping(Index) of
         true ->
@@ -41,6 +42,11 @@ iterate_entropy_data(Index, Filter, Fun) ->
             ok
     end.
 
+-spec iterate_entropy_data(index_name(),
+                           list(),
+                           function(),
+                           entropy_data() | {error, term()}) ->
+                                  ok | {error, term()}.
 iterate_entropy_data(Index, Filter, Fun, #entropy_data{more=true,
                                                        continuation=Cont,
                                                        pairs=Pairs}) ->
@@ -50,4 +56,12 @@ iterate_entropy_data(Index, Filter, Fun, #entropy_data{more=true,
     iterate_entropy_data(Index, Filter2, Fun, ED);
 iterate_entropy_data(_, _, Fun, #entropy_data{more=false,
                                               pairs=Pairs}) ->
-    lists:foreach(Fun, Pairs).
+    lists:foreach(Fun, Pairs);
+iterate_entropy_data(Index, Filter, Fun, {error, _}) ->
+    case yz_solr:entropy_data(Index, Filter) of
+        #entropy_data{} = ED ->
+            iterate_entropy_data(Index, Filter, Fun, ED);
+        {error, _} = Error ->
+            Error
+    end.
+

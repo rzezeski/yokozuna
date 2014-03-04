@@ -288,7 +288,7 @@ load_built(#state{trees=Trees}) ->
         _ -> false
     end.
 
--spec fold_keys(p(), tree()) -> ok.
+-spec fold_keys(p(), tree()) -> ok | {error, term()}.
 fold_keys(Partition, Tree) ->
     LI = yz_cover:logical_index(yz_misc:get_ring(transformed)),
     LogicalPartition = yz_cover:logical_partition(LI, Partition),
@@ -544,9 +544,14 @@ build_or_rehash(Tree, Locked, Type, #state{index=Index, trees=Trees}) ->
     case {Locked, Type} of
         {true, build} ->
             lager:debug("Starting build: ~p", [Index]),
-            fold_keys(Index, Tree),
-            lager:debug("Finished build: ~p", [Index]),
-            gen_server:cast(Tree, build_finished);
+            case fold_keys(Index, Tree) of
+                ok ->
+                    lager:debug("Finished build: ~p", [Index]),
+                    gen_server:cast(Tree, build_finished);
+                {error, Reason} ->
+                    lager:warning("Build of tree for partition ~p failed because ~p, another attempt will be made later"),
+                    gen_server:cast(Tree, build_failed)
+            end;
         {true, rehash} ->
             lager:debug("Starting rehash: ~p", [Index]),
             _ = [hashtree:rehash_tree(T) || {_,T} <- Trees],
