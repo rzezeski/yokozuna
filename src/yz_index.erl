@@ -238,15 +238,15 @@ reload(Index, Opts) ->
 %%      node.  Return the list of non-owned partitions found.
 -spec remove_non_owned_data(index_name(), ring()) -> [p()].
 remove_non_owned_data(Index, Ring) ->
-    IndexPartitions = yz_cover:reify_partitions(Ring,
-                                                yokozuna:partition_list(Index)),
-    OwnedAndNext = yz_misc:owned_and_next_partitions(node(), Ring),
-    NonOwned = ordsets:subtract(IndexPartitions, OwnedAndNext),
-    LNonOwned = yz_cover:logical_partitions(Ring, NonOwned),
+    IndexPartitions = yokozuna:partition_list(Index),
+    LOwnedAndNext = yz_cover:logical_partitions(Ring,
+                                                yz_misc:owned_and_next_partitions(node(), Ring)),
+    LNonOwned = ordsets:subtract(IndexPartitions, LOwnedAndNext),
+    %% LNonOwned = yz_cover:logical_partitions(Ring, NonOwned),
     Queries = [{'query', <<?YZ_PN_FIELD_S, ":", (?INT_TO_BIN(LP))/binary>>}
                || LP <- LNonOwned],
     ok = yz_solr:delete(Index, Queries),
-    NonOwned.
+    LNonOwned.
 
 -spec schema_name(index_info()) -> schema_name().
 schema_name(Info) ->
