@@ -37,14 +37,15 @@ confirm() ->
     ok = setup_index(ClusterAndConns),
 
     {0, _} = load_data(ResultsDir, Cluster, ?BUCKET, YZBenchDir, NumKeys, max, 32),
+    timer:sleep(60000),
     %% wait for soft commit
     timer:sleep(1100),
 
-    [{0, _} = query_2i(ResultsDir, Cluster, NumKeys, NumMatch, max, 32)
-     || NumMatch <- [1, 10, 100, 1000]],
+    %% [{0, _} = query_2i(ResultsDir, Cluster, NumKeys, NumMatch, max, 32)
+    %%  || NumMatch <- [1, 10, 100, 1000]],
 
-    [{0, _} = query_yz(ResultsDir, Cluster, YZBenchDir, NumKeys, NumMatch, max, 32)
-     || NumMatch <- [1, 10, 100]],
+    %% [{0, _} = query_yz(ResultsDir, Cluster, YZBenchDir, NumKeys, NumMatch, max, 32)
+    %%  || NumMatch <- [1, 10, 100, 1000]],
 
     [{0, _} = query_yz_cursor(ResultsDir, Cluster, YZBenchDir, NumKeys, NumMatch, 100, max, 32)
      || NumMatch <- [1000]],
@@ -142,11 +143,12 @@ query_yz(ResultsDir, Cluster, YZBenchDir, _NumKeys, NumMatch, Rate, Concurrent) 
 
 query_yz_cursor(ResultsDir, Cluster, YZBenchDir, _NumKeys, NumMatch, Rows, Rate, Concurrent) ->
     lager:info("Running yokozuna cursor query to match ~B keys", [NumMatch]),
-    Conns = yz_rt:host_entries(http, rt:connection_info(Cluster)),
+    Conns = yz_rt:host_entries(http, [hd(rt:connection_info(Cluster))]),
     Params = [{fl, <<"_yz_rt,_yz_rb,_yz_rk">>},
-              {sort, <<"score desc,_yz_id asc">>},
+              %% {sort, <<"_yz_rt asc,_yz_rb asc,_yz_rk asc,score asc">>},
+              {sort, <<"score asc">>},
               {rows, Rows}],
-    QOpts = [{paginate, cursor}],
+    QOpts = [{paginate, start_and_rows}],
     Operations = [{{random_fruit_search, Params, 1, {NumMatch, NumMatch}, QOpts}, 1}],
     Cfg = [{mode, Rate},
            {duration, 2},

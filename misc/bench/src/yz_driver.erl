@@ -8,7 +8,7 @@
 
 -include_lib("basho_bench/include/basho_bench.hrl").
 -type cardinality() :: pos_integer().
--record(state, {add_2i, default_field, fruits, pb_conns, index, bucket, iurls, surls}).
+-record(state, {add_2i, default_field, fruits, pb_conns, index, bucket, results_tab, iurls, surls}).
 -define(DONT_VERIFY, dont_verify).
 
 -define(M100,   100000000).
@@ -83,11 +83,15 @@ new(_Id) ->
     N = length(HTTP),
     M = length(PB),
 
+    ResultsTabName = list_to_atom("results_tab_" ++ integer_to_list(_Id)),
+    ResultsTab = ets:new(ResultsTabName, [set, protected, {write_concurrency, true}]),
+
     {ok, #state{add_2i=Add2i,
                 pb_conns={Conns, {0,M}},
                 bucket=Bucket,
                 default_field=DefaultField,
                 index=Index,
+                results_tab=ResultsTab,
                 iurls={IURLs, {0,N}},
                 surls={SURLs, {0,N}}}}.
 
@@ -469,24 +473,27 @@ paginate_via_cursor_(Query, Params, S, {Cursor, NumSeen}) ->
 
 paginate_via_start_and_rows(Query, Params, ExpectedNumFound, S) ->
     DF = S#state.default_field,
+    ResultsTab = S#state.results_tab,
     Params2 = [{q, Query},
                {df, DF},
                {wt, <<"json">>}|Params],
-    case paginate_via_start_and_rows_(Query, Params2, S, {0, 0}) of
-        {ok, Seen} ->
-            case ExpectedNumFound == Seen of
+    case paginate_via_start_and_rows_(Query, Params2, S, {0, 0, ResultsTab}) of
+        {ok, Seen, Unique} ->
+            case ExpectedNumFound == Seen andalso ExpectedNumFound == Unique of
                 true ->
                     {ok, S};
                 false ->
-                    ?ERROR("Query '~s' expected ~B but got ~B",
-                           [Query, ExpectedNumFound, Seen]),
-                    {error, {num_found, ExpectedNumFound, Seen}, S}
+                    ?ERROR("Query '~s' expected ~B but got ~B with ~B unique",
+                           [Query, ExpectedNumFound, Seen, Unique]),
+                    {error, {num_found, ExpectedNumFound, Seen, Unique}, S}
             end;
         Err ->
             Err
     end.
 
-paginate_via_start_and_rows_(Query, Params, S, {Start, NumSeen}) ->
+paginate_via_start_and_rows_(Query, Params, S, {Start, NumSeen, ResultsTab}) ->
+    %% Sleep on purpose to include coverage plan change
+    timer:sleep(1000),
     URLs=S#state.surls,
     Base = get_base(URLs),
     Params2 = lists:keystore(start, 1, Params, {start, Start}),
@@ -496,16 +503,30 @@ paginate_via_start_and_rows_(Query, Params, S, {Start, NumSeen}) ->
         {ok, Body} ->
             Struct = mochijson2:decode(Body),
             Docs = length(get_path(Struct, [<<"response">>, <<"docs">>])),
+            ok = insert_results(get_path(Struct, [<<"response">>, <<"docs">>]), ResultsTab),
             NewNumSeen = NumSeen + Docs,
             case Docs > 0 of
                 true ->
-                    paginate_via_start_and_rows_(Query, Params2, S, {Start + Rows, NewNumSeen});
+                    paginate_via_start_and_rows_(Query, Params2, S, {Start + Rows, NewNumSeen, ResultsTab});
                 false ->
-                    {ok, NewNumSeen}
+                    Unique = ets:info(ResultsTab, size),
+                    {ok, NewNumSeen, Unique}
             end;
         {error, Reason} ->
             {error, Reason, S}
     end.
+
+-spec insert_results([{struct, [{atom(), binary()}]}], ets:tab()) -> ok.
+insert_results(Docs, ResultsTab) ->
+    true = ets:insert(ResultsTab, [{get_full_riak_key(Doc)} || Doc <- Docs]),
+    ok.
+
+-spec get_full_riak_key({struct, [{atom(), binary()}]}) -> binary().
+get_full_riak_key(Doc) ->
+    RT = get_path(Doc, [<<"_yz_rt">>]),
+    RB = get_path(Doc, [<<"_yz_rb">>]),
+    RK = get_path(Doc, [<<"_yz_rk">>]),
+    <<RT/binary,"/",RB/binary,"/",RK/binary>>.
 
 %% @private
 %%

@@ -75,6 +75,7 @@ reify_partitions(Ring, LPartitions) ->
     ordsets:from_list([partition(LI, LP) || LP <- LPartitions]).
 
 start_link() ->
+    lager:error("STARTING COVER FUCK"),
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%===================================================================
@@ -82,7 +83,10 @@ start_link() ->
 %%%===================================================================
 
 init([]) ->
-    schedule_tick(),
+    erlang:send_after(60000, ?MODULE, tick),
+    %% Ring = yz_misc:get_ring(transformed),
+    %% ok = update_all_plans(Ring),
+    %% schedule_tick(),
     {ok, #state{ring_used=undefined}}.
 
 handle_cast(update_all_plans, S) ->
@@ -93,7 +97,7 @@ handle_cast(update_all_plans, S) ->
 handle_info(tick, S) ->
     Ring = yz_misc:get_ring(transformed),
     ok = update_all_plans(Ring),
-    schedule_tick(),
+    %% schedule_tick(),
     {noreply, S#state{ring_used=Ring}};
 
 handle_info(Req, S) ->
@@ -133,9 +137,10 @@ add_filtering(N, Q, LPI, PS) ->
 -spec cache_plan(index_name(), ring()) -> ok.
 cache_plan(Index, Ring) ->
     case calc_plan(Index, Ring) of
-        {error, _} ->
-            mochiglobal:put(?BIN_TO_ATOM(Index), undefined);
+        %% {error, _} ->
+        %%     mochiglobal:put(?BIN_TO_ATOM(Index), undefined);
         {ok, Plan} ->
+            lager:error("IM PUTTING THE PLAN YOU FUCK: ~p", [?BIN_TO_ATOM(Index)]),
             mochiglobal:put(?BIN_TO_ATOM(Index), {ok, Plan})
     end,
     ok.
@@ -293,5 +298,6 @@ schedule_tick() ->
 -spec update_all_plans(ring()) -> ok.
 update_all_plans(Ring) ->
     Indexes = yz_index:get_indexes_from_meta(),
+    lager:error("WHAT THE FUCK ~p", [Indexes]),
     _ = [ok = cache_plan(I, Ring) || I <- Indexes],
     ok.

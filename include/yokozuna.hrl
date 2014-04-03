@@ -153,7 +153,7 @@
 -define(YZ_SECURITY_SEARCH_PERM, "search.query").
 -define(YZ_SECURITY_ADMIN_PERM, "search.admin").
 
--define(YZ_COVER_TICK_INTERVAL, app_helper:get_env(?YZ_APP_NAME, cover_tick, 2000)).
+-define(YZ_COVER_TICK_INTERVAL, app_helper:get_env(?YZ_APP_NAME, cover_tick, 600000)).
 -define(YZ_DEFAULT_SOLR_PORT, 8983).
 -define(YZ_DEFAULT_SOLR_STARTUP_WAIT, 30).
 %% TODO: See if using mochiglobal for this makes difference in performance.
