@@ -81,17 +81,40 @@ mapred_search(Pipe, [Index, Query], _Timeout) ->
     mapred_search(Pipe, [Index, Query, <<"">>], _Timeout);
 mapred_search(Pipe, [Index, Query, Filter], _Timeout) ->
     %% Function to convert `search_fold' results into pipe format.
-    Q = fun({Bucket,Key,Props}) ->
-                riak_pipe:queue_work(Pipe, {{Bucket, Key}, {struct, Props}})
-        end,
+    %% Q = fun({Bucket,Key,Props}) ->
+    %%             riak_pipe:queue_work(Pipe, {{Bucket, Key}, {struct, Props}})
+    %%     end,
     F = fun(Results, Acc) ->
                 %% TODO: is there a way to send a batch of results?
                 %% Avoiding the `foreach` would be nice.
-                lists:foreach(Q, Results),
+                _ = [riak_pipe:queue_work(Pipe, {{Bucket, Key}, {struct, Props}})
+                     || {Bucket, Key, Props} <- Results],
                 Acc
+                %% lists:foreach(Q, Results),
+                %% Acc
         end,
-    ok = search_fold(Index, Query, Filter, F, ok),
-    riak_pipe:eoi(Pipe).
+
+    case search_fold(Index, Query, Filter, F, ok) of
+        {ok, _} ->
+            riak_pipe:eoi(Pipe),
+            ok;
+        {error, {Code, _Headers, Body}} ->
+            %% N.B. `riak_kv_wm_mapred:format_error' wants the error
+            %% as `{error, binary()}'. For HTTP any non-ASCII chars
+            %% will be escaped. The server side logs will be a raw
+            %% binary if there are any non-ASCII chars and will
+            %% require manual decoding via `io:format'. The additional
+            %% lager calls will properly print the message at the
+            %% price of extra logging.
+            lager:error("Error querying Solr: code=~s, body=~ts", [Code, Body]),
+            M = unicode:characters_to_binary(io_lib:format("Error querying Solr: code=~s, body=~ts~n", [Code, Body])),
+            {error, M};
+        {error, Reason} ->
+            lager:error("Error querying Solr: ~tp", [Reason]),
+            M = unicode:characters_to_binary(
+                  io_lib:format("Error querying Solr: ~tp~n", [Reason])),
+            {error, M}
+    end.
 
 %% @doc Return the ordered set of unique logical partitions stored on
 %%      the local node for the given `Index'.
@@ -124,8 +147,13 @@ partition_list(Index) ->
 %%
 %% `Acc' - The initial value of the accumulator.  It may be any
 %%   arbitrary Erlang term.
--spec search_fold(index_name(), binary(), binary(), fold_fun(), T::term()) ->
-                         T::term().
+-spec search_fold(index_name(),
+                  binary(),
+                  binary(),
+                  fold_fun(),
+                  term()) ->
+                         {ok, Acc :: term() } |
+                         {error, Reason :: term()}.
 search_fold(Index, Query, Filter, F, Acc) ->
     Start = 0,
     Params = [{q, Query},
@@ -135,14 +163,20 @@ search_fold(Index, Query, Filter, F, Acc) ->
               {fl, <<?YZ_RT_FIELD_S,",",?YZ_RB_FIELD_S,",",?YZ_RK_FIELD_S>>},
               {omitHeader, <<"true">>},
               {wt, <<"json">>}],
-    {_, Body} = yz_solr:dist_search(Index, Params),
-    case extract_docs(Body) of
-        [] ->
-            Acc;
-        Docs ->
-            Positions = positions(hd(Docs)),
-            E = extract_results(Docs, Positions),
-            search_fold(E, Start, Params, Positions, Index, Query, Filter, F, Acc)
+    case yz_solr:dist_search(Index, Params) of
+        {ok, {_, Body}} ->
+            case extract_docs(Body) of
+                [] ->
+                    {ok, Acc};
+                Docs ->
+                    Positions = positions(hd(Docs)),
+                    E = extract_results(Docs, Positions),
+                    FinalAcc = search_fold(E, Start, Params, Positions,
+                                           Index, Query, Filter, F, Acc),
+                    {ok, FinalAcc}
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 search(Index, Query) ->
@@ -200,6 +234,8 @@ extract_results(Docs, {TP, BP, KP}) ->
 %% N.B. This ugly hack is required because as far as I can tell
 %% there is not defined order of the fields inside the results
 %% returned by Solr.
+%%
+%% TODO: I'm not sure this is correct, I think it can change per request, sigh
 -spec positions({struct, [tuple()]}) ->
                        {integer(), integer(), integer()}.
 positions({struct,[X, Y, Z]}) ->
@@ -215,14 +251,21 @@ positions({struct,[X, Y, Z]}) ->
 %%      iteration happens.
 -spec search_fold(list(), non_neg_integer(), list(), positions(), index_name(),
                   binary(), binary(), fold_fun(), Acc::term()) ->
-                         Acc::term().
+                         {ok, Acc::term()} |
+                         {error, Reason :: term()}.
 search_fold([], _, _, _, _, _, _, _, Acc) ->
-    Acc;
+    {ok, Acc};
 search_fold(Results, Start, Params, Positions, Index, Query, Filter, F, Acc) ->
     F(Results, Acc),
     Start2 = Start + 10,
     Params2 = lists:keystore(start, 1, Params, {start, Start2}),
-    {_, Body} = yz_solr:dist_search(Index, Params2),
-    Docs = extract_docs(Body),
-    E = extract_results(Docs, Positions),
-    search_fold(E, Start2, Params, Positions, Index, Query, Filter, F, Acc).
+
+    case yz_solr:dist_search(Index, Params2) of
+        {ok, {_, Body}} ->
+            Docs = extract_docs(Body),
+            E = extract_results(Docs, Positions),
+            search_fold(E, Start2, Params2, Positions,
+                        Index, Query, Filter, F, Acc);
+        {error, _} = Err ->
+            Err
+    end.
